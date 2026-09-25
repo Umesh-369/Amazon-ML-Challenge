@@ -1,0 +1,17 @@
+{
+  "version": "v04_decoupled_multi_index",
+  "phase": "Phases 2-5 Multi-Channel Decoupled Architecture",
+  "change": "5-channel multi-index + decoupled source evaluation + surgical address disambiguation",
+  "candidate_recall": 0.602574700546579,
+  "precision": 0.7793126745373559,
+  "recall": 0.3995372117045277,
+  "f0_5": 0.6548253467697228,
+  "delta": 0.025075346769722784,
+  "false_positives": 79497,
+  "false_negatives": 960506,
+  "candidate_count": 16194932,
+  "runtime": 502.36925864219666,
+  "leakage_check_passed": "Y",
+  "status": "CURRENT BEST",
+  "notes": "Decoupled multi-index (+0.025075 F0.5 vs v03, +65228 FP reduction)"
+}

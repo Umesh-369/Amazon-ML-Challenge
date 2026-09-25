@@ -1,0 +1,5 @@
+version,phase,change,precision,recall,f0_5,delta,false_positives,false_negatives,candidate_count,promoted,submitted,leaderboard_score,status,notes
+v01_baseline,baseline,exact match,0.390579,0.214006,0.335256,0.0,3973876,1194528,1234025,Y,Y,0.335256,SUPERSEDED,Exact normalized country + exact normalized business name
+v02_unicode_nfkd,Phase 3,Unicode NFKD diacritic removal,0.431826,0.252467,0.378103,+0.042847,4456348,1134219,1285000,Y,N,None,SUPERSEDED,NFKD diacritic stripping on exact match
+v03_precision_pipeline,Phases 4-12,Multi-Index Precision Pipeline,0.712679,0.429732,0.629750,+0.294494,144725,895964,39906851,Y,Y,0.629750,SUPERSEDED,3-index blocking + address disambiguation + source cap
+v04_decoupled_multi_index,Phases 2-5,Decoupled Multi-Channel Precision-Hardened Architecture,0.779313,0.399537,0.654825,+0.025075,79497,960506,16194932,Y,N,Pending,CURRENT BEST,5-channel multi-index + decoupled source evaluation + surgical address disambiguation (+0.0251 F0.5 gain, 45.1% FP reduction)
