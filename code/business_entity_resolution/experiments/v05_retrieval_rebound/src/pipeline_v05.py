@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
 """
 Amazon ML Challenge 2026: Business Entity Resolution
-Pipeline v06 — Precision-Hardened High-Recall Architecture (CURRENT BEST)
+Pipeline v05 — Decoupled High-Recall Multi-Channel Architecture (CURRENT BEST)
 
 Benchmark Progression:
 - v01 (Exact Baseline):           F0.5 = 0.335256 (P=0.3906, R=0.2140)
 - v02 (Unicode NFKD):             F0.5 = 0.378103 (P=0.4318, R=0.2525)
 - v03 (Precision Pipeline):       F0.5 = 0.629750 (P=0.7127, R=0.4297)
 - v04 (Decoupled Multi-Index):    F0.5 = 0.654825 (P=0.7793, R=0.3995)
-- v05 (High-Recall Architecture): F0.5 = 0.794977 (P=0.8287, R=0.6836)
-- v06 (Precision-Hardened):       F0.5 = 0.799943 (P=0.8335, R=0.6889) [~0.8000 Benchmark!]
+- v05 (High-Recall Architecture): F0.5 = 0.794977 (P=0.8287, R=0.6836) [+0.1402 F0.5 Gain!]
 
-Key Innovations in v06:
-1. Indian Metro & Locality Conflict Guard:
-   - Identifies Indian metropolitan hubs (Delhi, Mumbai, Bengaluru, Chennai, Kolkata, Hyderabad, Pune).
-   - Suppresses cross-metro collisions between identical chain names across different states.
-2. Token Jaccard Disambiguation on Distinctive Names:
-   - Computes set Jaccard similarity on candidate pairs, eliminating 954 false positive collisions.
-3. Universal Brahmic Script Transliteration:
-   - Full algorithmic phonetic mapping of Devanagari, Tamil, Telugu, Kannada, Bengali, Gujarati to Latin base.
+Key Innovations in v05:
+1. Universal Brahmic Script Transliteration:
+   - Algorithmic phonetic mapping of Indic scripts (Devanagari, Tamil, Telugu, etc.) to Latin base
+     characters, recovering the 26.2% of retrieval misses due to Indic script in S2/S3.
+2. Decoupled Multi-Channel Candidate Retrieval:
+   - Surfaces candidates across 6 independent inverted indexes into candidate_pairs.tsv,
+     boosting Candidate Recall from 60.26% to 78.56% and pushing Oracle Ceiling to 0.9482.
+3. Multi-Tenant Name Guard:
+   - In Address Anchor matching, requires name initial agreement or Indic transliteration,
+     preventing false positive merges in commercial shopping centers and office complexes.
 4. Word Transposition & Postal Channels:
-   - Sorted core names and PIN/ZIP prefix channels recover altered word orders and missing street numbers.
-5. High-Throughput Buffered Output Generation:
-   - Employs 50,000-line memory batching to prevent OneDrive filesystem write-lock throttling.
+   - Sorted core name and PIN/ZIP prefix channels recover altered word orders and missing street numbers.
+5. Optimized Match Cardinality Capping:
+   - Ground truth distribution shows entities have 3-5 matches on average.
+   - Sweep-optimized Top-5 per source matching eliminates the artificial recall bottleneck of v03/v04.
 """
 
 import argparse
@@ -32,7 +34,6 @@ import os
 import re
 import string
 import sys
-import tempfile
 import time
 import unicodedata
 from collections import defaultdict
@@ -96,22 +97,6 @@ STOP_WORDS = {
     'rue', 'avenue', 'boulevard', 'bd', 'chemin', 'place'
 }
 
-INDIAN_METROS = {
-    'delhi': 'delhi', 'new delhi': 'delhi',
-    'mumbai': 'mumbai', 'bombay': 'mumbai',
-    'bangalore': 'bangalore', 'bengaluru': 'bangalore',
-    'chennai': 'chennai', 'madras': 'chennai',
-    'kolkata': 'kolkata', 'calcutta': 'kolkata',
-    'hyderabad': 'hyderabad', 'secunderabad': 'hyderabad',
-    'pune': 'pune', 'ahmedabad': 'ahmedabad'
-}
-
-def extract_metro(norm_addr: str) -> str:
-    for word in norm_addr.split():
-        if word in INDIAN_METROS:
-            return INDIAN_METROS[word]
-    return ""
-
 def extract_core_name(norm_name: str) -> str:
     tokens = [t for t in norm_name.split() if t not in LEGAL_SUFFIXES]
     return " ".join(tokens)
@@ -135,15 +120,9 @@ def extract_first_street_token(norm_addr: str) -> str:
             return t
     return ""
 
-def token_jaccard(toks1: set, toks2: set) -> float:
-    if not toks1 or not toks2:
-        return 0.0
-    u = len(toks1 | toks2)
-    return len(toks1 & toks2) / u if u > 0 else 0.0
-
 def build_indices(s2_path: str, s3_path: str):
     print("=" * 70)
-    print("INDEXING SOURCE 2 & SOURCE 3 (v06 HIGH-PRECISION ARCHITECTURE)")
+    print("INDEXING SOURCE 2 & SOURCE 3 (v05 HIGH-RECALL RETRIEVAL ARCHITECTURE)")
     print("=" * 70)
     t0 = time.time()
 
@@ -174,33 +153,31 @@ def build_indices(s2_path: str, s3_path: str):
                 raw_addr = row[2] if len(row) > 2 else ""
                 norm_addr = fast_norm(raw_addr)
                 b_num = extract_primary_number(raw_addr)
-                s_tok = extract_first_street_token(norm_addr)
                 postcode = extract_postal_code(raw_addr)
-                metro = extract_metro(norm_addr) if country == 'india' else ""
+                s_tok = extract_first_street_token(norm_addr)
                 first_char = norm_name[0] if norm_name else ""
-                name_toks = set([t for t in norm_name.split() if t not in LEGAL_SUFFIXES and t not in STOP_WORDS])
 
-                idx_exact[(country, norm_name)].append((eid, b_num, postcode, metro))
+                idx_exact[(country, norm_name)].append((eid, b_num))
                 core_name = extract_core_name(norm_name)
                 if core_name and core_name != norm_name:
-                    idx_core[(country, core_name)].append((eid, b_num, postcode, metro))
+                    idx_core[(country, core_name)].append((eid, b_num))
 
-                sorted_tokens = sorted(list(name_toks))
+                sorted_tokens = sorted([t for t in norm_name.split() if t not in LEGAL_SUFFIXES and t not in STOP_WORDS])
                 if len(sorted_tokens) >= 2:
                     sorted_core = " ".join(sorted_tokens)
                     if sorted_core != core_name:
-                        idx_sorted_core[(country, sorted_core)].append((eid, b_num, postcode, metro))
+                        idx_sorted_core[(country, sorted_core)].append((eid, b_num))
 
                 if b_num > 0:
                     if len(norm_name) >= 4 and len(idx_bnum_prefix[(country, b_num, norm_name[:4])]) < 10:
                         idx_bnum_prefix[(country, b_num, norm_name[:4])].append(eid)
                     if s_tok:
-                        idx_addr[(country, b_num, s_tok)].append((eid, first_char, name_toks))
+                        idx_addr[(country, b_num, s_tok)].append((eid, first_char))
 
                 if s_tok:
-                    dist_toks = [t for t in name_toks if len(t) >= 5]
-                    if dist_toks and len(idx_tok_street[(country, dist_toks[0], s_tok)]) < 8:
-                        idx_tok_street[(country, dist_toks[0], s_tok)].append((eid, name_toks, metro))
+                    name_toks = [t for t in norm_name.split() if len(t) >= 5 and t not in LEGAL_SUFFIXES and t not in STOP_WORDS]
+                    if name_toks and len(idx_tok_street[(country, name_toks[0], s_tok)]) < 8:
+                        idx_tok_street[(country, name_toks[0], s_tok)].append(eid)
 
                 if postcode and len(norm_name) >= 4 and len(idx_pin_prefix[(country, postcode, norm_name[:4])]) < 8:
                     idx_pin_prefix[(country, postcode, norm_name[:4])].append(eid)
@@ -216,113 +193,100 @@ def query_s1(row, idx_exact, idx_core, idx_sorted_core, idx_bnum_prefix, idx_pin
     raw_addr = row[2] if len(row) > 2 else ""
     norm_addr = fast_norm(raw_addr)
     b_num = extract_primary_number(raw_addr)
-    s_tok = extract_first_street_token(norm_addr)
     postcode = extract_postal_code(raw_addr)
-    metro = extract_metro(norm_addr) if country == 'india' else ""
-    core_name = extract_core_name(norm_name)
+    s_tok = extract_first_street_token(norm_addr)
     first_char = norm_name[0] if norm_name else ""
-    s1_toks = set([t for t in norm_name.split() if t not in LEGAL_SUFFIXES and t not in STOP_WORDS])
-    sorted_tokens = sorted(list(s1_toks))
+    core_name = extract_core_name(norm_name)
+    sorted_tokens = sorted([t for t in norm_name.split() if t not in LEGAL_SUFFIXES and t not in STOP_WORDS])
     sorted_core = " ".join(sorted_tokens) if len(sorted_tokens) >= 2 else ""
 
-    scored_s2 = []
-    scored_s3 = []
+    cands_s2 = []
+    cands_s3 = []
     seen_cands = set()
 
-    def add_s(sc, cid):
+    def add_c(sc, cid):
         seen_cands.add(cid)
         if sc >= 75:
-            if cid.startswith('S2-'): scored_s2.append((sc, cid))
-            else: scored_s3.append((sc, cid))
+            if cid.startswith('S2-'): cands_s2.append((sc, cid))
+            else: cands_s3.append((sc, cid))
 
     # 1. Exact Name Matches
     exact_list = idx_exact.get((country, norm_name), [])
     bkt = len(exact_list)
-    for c_eid, c_num, c_post, c_metro in exact_list:
+    for c_eid, c_num in exact_list:
         score = 0
-        if metro and c_metro and metro != c_metro:
-            score = 0
-        elif postcode and c_post and postcode != c_post:
-            score = 0
-        elif b_num > 0 and c_num > 0:
+        if b_num > 0 and c_num > 0:
             score = 100 if b_num == c_num else 0
         elif b_num == 0 or c_num == 0:
-            score = 90 if (postcode and c_post and postcode == c_post) else (85 if bkt <= 6 else (80 if bkt <= 12 else 0))
-        add_s(score, c_eid)
+            score = 85 if bkt <= 6 else (80 if bkt <= 12 else 0)
+        add_c(score, c_eid)
 
     # 2. Core Name Matches
     if core_name and core_name != norm_name:
         core_list = idx_core.get((country, core_name), [])
         core_bkt = len(core_list)
-        for c_eid, c_num, c_post, c_metro in core_list:
+        for c_eid, c_num in core_list:
             score = 0
-            if metro and c_metro and metro != c_metro:
-                score = 0
-            elif postcode and c_post and postcode != c_post:
-                score = 0
-            elif b_num > 0 and c_num > 0:
+            if b_num > 0 and c_num > 0:
                 score = 90 if b_num == c_num else 0
             elif b_num == 0 or c_num == 0:
                 score = 80 if core_bkt <= 3 else 0
-            add_s(score, c_eid)
+            add_c(score, c_eid)
 
-    # 3. Sorted Core Name Matches
+    # 3. Sorted Core Name Matches (Transpositions)
     if sorted_core and sorted_core != core_name:
         sc_list = idx_sorted_core.get((country, sorted_core), [])
         sc_bkt = len(sc_list)
-        for c_eid, c_num, c_post, c_metro in sc_list:
+        for c_eid, c_num in sc_list:
             score = 0
-            if metro and c_metro and metro != c_metro:
-                score = 0
-            elif postcode and c_post and postcode != c_post:
-                score = 0
-            elif b_num > 0 and c_num > 0:
+            if b_num > 0 and c_num > 0:
                 score = 88 if b_num == c_num else 0
             elif b_num == 0 or c_num == 0:
                 score = 80 if sc_bkt <= 2 else 0
-            add_s(score, c_eid)
+            add_c(score, c_eid)
 
     # 4. Building Number + Name 4-char Prefix
     if b_num > 0 and len(norm_name) >= 4:
         p_list = idx_bnum_prefix.get((country, b_num, norm_name[:4]), [])
         if 0 < len(p_list) <= 4:
             for c_eid in p_list:
-                add_s(84, c_eid)
+                add_c(82, c_eid)
 
-    # 5. Address Anchor Matches (with Jaccard / first_char guard)
+    # 5. Address Anchor Matches (with first_char name guard)
     if b_num > 0 and s_tok:
         addr_list = idx_addr.get((country, b_num, s_tok), [])
         a_bkt = len(addr_list)
         if 0 < a_bkt <= 6:
-            for c_eid, c_fchar, c_toks in addr_list:
-                jacc = token_jaccard(s1_toks, c_toks)
-                if jacc >= 0.33 or (first_char and c_fchar and first_char == c_fchar):
-                    add_s(76, c_eid)
+            for c_eid, c_fchar in addr_list:
+                score = 0
+                if a_bkt == 1:
+                    score = 75
+                elif first_char and c_fchar and first_char == c_fchar:
+                    score = 75
+                add_c(score, c_eid)
 
-    # 6. Distinctive Name Token + Street Token (with Jaccard & Metro guard)
+    # 6. Distinctive Name Token + Street Token (Recovers missing/conflicting b_num)
     if s_tok:
-        dist_toks = [t for t in s1_toks if len(t) >= 5]
-        if dist_toks:
-            ts_list = idx_tok_street.get((country, dist_toks[0], s_tok), [])
+        name_toks = [t for t in norm_name.split() if len(t) >= 5 and t not in LEGAL_SUFFIXES and t not in STOP_WORDS]
+        if name_toks:
+            p_tok = name_toks[0]
+            ts_list = idx_tok_street.get((country, p_tok, s_tok), [])
             if 0 < len(ts_list) <= 4:
-                for c_eid, c_toks, c_metro in ts_list:
-                    if metro and c_metro and metro != c_metro:
-                        continue
-                    jacc = token_jaccard(s1_toks, c_toks)
-                    if jacc >= 0.30 or len(dist_toks[0]) >= 7:
-                        add_s(85, c_eid)
+                for c_eid in ts_list:
+                    add_c(82, c_eid)
 
     # 7. Postal Code + Name 4-char Prefix
     if postcode and len(norm_name) >= 4:
         pin_list = idx_pin_prefix.get((country, postcode, norm_name[:4]), [])
         if 0 < len(pin_list) <= 4:
             for c_eid in pin_list:
-                add_s(84, c_eid)
+                add_c(82, c_eid)
 
-    scored_s2.sort(reverse=True)
-    scored_s3.sort(reverse=True)
+    cands_s2.sort(reverse=True)
+    cands_s3.sort(reverse=True)
 
-    top_matches = sorted(list(set([cid for sc, cid in scored_s2[:5]] + [cid for sc, cid in scored_s3[:5]])))
+    # Sweep-optimized Top-5 per source matching
+    top_matches = sorted(list(set([cid for sc, cid in cands_s2[:5]] + [cid for sc, cid in cands_s3[:5]])))
     all_candidates = sorted(list(seen_cands))
 
     return top_matches, all_candidates
@@ -336,7 +300,7 @@ def run_test_inference(test_dir: str, output_dir: str):
     candidate_out = os.path.join(output_dir, "candidate_pairs.tsv")
 
     print("=" * 70)
-    print("RUNNING FAST TEST INFERENCE (PIPELINE v06 — BATCH BUFFERED)")
+    print("RUNNING TEST INFERENCE (PIPELINE v05 — HIGH-RECALL ARCHITECTURE)")
     print(f"  Test directory:   {test_dir}")
     print(f"  Output directory: {output_dir}")
     print("=" * 70)
@@ -344,25 +308,16 @@ def run_test_inference(test_dir: str, output_dir: str):
     t_start = time.time()
     idx_exact, idx_core, idx_sorted_core, idx_bnum_prefix, idx_pin_prefix, idx_tok_street, idx_addr = build_indices(s2_path, s3_path)
 
-    print("\nProcessing Source 1 queries and generating buffered outputs...")
+    print("\nProcessing Source 1 queries and generating output files...")
     t0 = time.time()
     total_s1 = 0
     matched_s1 = 0
     total_matches = 0
     total_candidates = 0
 
-    match_buffer = []
-    cand_buffer = []
-    BATCH_SIZE = 50000
-
-    # Write to local temp files first to avoid OneDrive real-time write locks
-    temp_dir = tempfile.gettempdir()
-    temp_match = os.path.join(temp_dir, "temp_matching_results.tsv")
-    temp_cand = os.path.join(temp_dir, "temp_candidate_pairs.tsv")
-
     with open(s1_path, 'r', encoding='utf-8') as f_in, \
-         open(temp_match, 'w', encoding='utf-8', newline='') as f_match, \
-         open(temp_cand, 'w', encoding='utf-8', newline='') as f_cand:
+         open(matching_out, 'w', encoding='utf-8', newline='') as f_match, \
+         open(candidate_out, 'w', encoding='utf-8', newline='') as f_cand:
 
         f_match.write("source1_entity_id\tmatched_entity_ids\n")
         f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
@@ -382,26 +337,11 @@ def run_test_inference(test_dir: str, output_dir: str):
                 total_matches += len(top_matches)
             total_candidates += len(all_candidates)
 
-            match_buffer.append(f"{s1_id}\t{match_str}\n")
-            cand_buffer.append(f"{s1_id}\t{cand_str}\n")
-
-            if len(match_buffer) >= BATCH_SIZE:
-                f_match.write("".join(match_buffer))
-                f_cand.write("".join(cand_buffer))
-                match_buffer.clear()
-                cand_buffer.clear()
+            f_match.write(f"{s1_id}\t{match_str}\n")
+            f_cand.write(f"{s1_id}\t{cand_str}\n")
 
             if total_s1 % 300000 == 0:
                 print(f"  Processed {total_s1:,} queries in {time.time()-t0:.1f}s...")
-
-        if match_buffer:
-            f_match.write("".join(match_buffer))
-            f_cand.write("".join(cand_buffer))
-
-    # Move temp files to target output atomically
-    import shutil
-    shutil.move(temp_match, matching_out)
-    shutil.move(temp_cand, candidate_out)
 
     print(f"\nInference completed in {time.time()-t_start:.1f}s.")
     print(f"  Total S1 queries: {total_s1:,}")
@@ -412,7 +352,7 @@ def run_test_inference(test_dir: str, output_dir: str):
     print(f"  Wrote: {matching_out} and {candidate_out}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Pipeline v06 — Precision-Hardened Architecture")
+    parser = argparse.ArgumentParser(description="Pipeline v05 — Decoupled High-Recall Architecture")
     parser.add_argument("--test-dir", default="Amazon-ML-Challenge/dataset/test", help="Test dataset directory")
     parser.add_argument("--output-dir", default="Amazon-ML-Challenge/output", help="Output directory")
     args = parser.parse_args()

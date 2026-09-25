@@ -1,0 +1,18 @@
+{
+  "version": "v06_precision_hardening",
+  "phase": "Precision-Hardened High-Recall Architecture",
+  "change": "Metro conflict guard + token Jaccard disambiguation + 50k buffered I/O",
+  "candidate_recall": 0.785593,
+  "oracle_f0_5": 0.948241,
+  "precision": 0.833548,
+  "recall": 0.688855,
+  "f0_5": 0.799943,
+  "delta": 0.004966,
+  "false_positives": 7277,
+  "false_negatives": 22152,
+  "candidate_count": 28450120,
+  "runtime": 122.7,
+  "leakage_check_passed": "Y",
+  "status": "CURRENT BEST",
+  "notes": "Precision-hardened architecture (+0.004966 F0.5 gain over v05, 954 FP reduction, ~0.8000 benchmark)"
+}

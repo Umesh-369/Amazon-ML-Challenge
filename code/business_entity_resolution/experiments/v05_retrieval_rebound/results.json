@@ -1,0 +1,18 @@
+{
+  "version": "v05_retrieval_rebound",
+  "phase": "High-Recall Multi-Channel Decoupled Architecture",
+  "change": "Decoupled 6-channel retrieval + Indic Brahmic transliteration + PIN/ZIP prefix + word transpositions + Top-5 source cap",
+  "candidate_recall": 0.785593,
+  "oracle_f0_5": 0.948241,
+  "precision": 0.828738,
+  "recall": 0.683587,
+  "f0_5": 0.794977,
+  "delta": 0.140152,
+  "false_positives": 8231,
+  "false_negatives": 24900,
+  "candidate_count": 28450120,
+  "runtime": 88.4,
+  "leakage_check_passed": "Y",
+  "status": "CURRENT BEST",
+  "notes": "Decoupled multi-channel retrieval (+0.140152 F0.5 gain over v04, Oracle ceiling reaches 0.9482)"
+}
