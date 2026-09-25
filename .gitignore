@@ -71,6 +71,8 @@ __MACOSX/
 # Challenge Datasets and TSV/CSV files (>100MB / challenge data)
 *.tsv
 *.csv
+*.npy
+!code/business_entity_resolution/experiments/log.csv
 dataset/
 output/
 student_resource/dataset/
