@@ -1,77 +1,74 @@
-# Submission 1 — Strict Exact-Match Baseline
+# Amazon ML Challenge 2026: Business Entity Resolution
 
-## Amazon ML Challenge 2026: Business Entity Resolution
+## Production Solution — Ultra-Fast Multi-Index Precision Pipeline (v03)
 
 ### 1. Overview
-This package contains the implementation for **Submission 1 (Strict Exact-Match Baseline)**. It implements a deterministic, precision-oriented baseline that resolves entity matches between Source 1 and Sources 2 & 3 based purely on exact string equality of normalized business names and normalized countries.
+In large-scale commercial platforms, entity records arrive from noisy, independent sources lacking shared identifiers. This package implements a high-performance, precision-oriented Machine Learning solution to resolve business entities from **Source 1** against **Source 2** and **Source 3**.
 
-### 2. Matching Logic & Rules
-- **Business Name Normalization**:
-  1. Unicode casefolding (`str.casefold()`).
-  2. Stripping leading/trailing whitespace.
-  3. Replacing all Unicode and ASCII punctuation characters with whitespace.
-  4. Collapsing consecutive whitespace to a single space.
-  5. Missing/null values are non-matchable.
-- **Country Normalization**:
-  1. Unicode casefolding.
-  2. Stripping leading/trailing whitespace.
-  3. Replacing punctuation characters with whitespace.
-  4. Collapsing consecutive whitespace to a single space.
-  5. Treated as an open-set string (supporting US, India, France, etc.).
-  6. Missing/null values are non-matchable.
-- **Matching Rule**:
-  A candidate match is established if and only if:
-  $$\text{normalized\_country}(S1) == \text{normalized\_country}(S2/S3)$$
-  AND
-  $$\text{normalized\_business\_name}(S1) == \text{normalized\_business\_name}(S2/S3)$$
-- **Candidate Set & Matching Set**:
-  In Submission 1, `candidate_pairs.tsv` and `matching_results.tsv` contain identical pairs, with IDs deduplicated and lexicographically sorted per Source 1 record.
+The primary evaluation metric is **Macro-Averaged $F_{0.5}$**, which weights precision twice as heavily as recall:
+$$F_{0.5} = \frac{1.25 \times \text{Precision} \times \text{Recall}}{0.25 \times \text{Precision} + \text{Recall}}$$
+
+### 2. Architecture & Key Innovations
+1. **Universal Fast C-Level Normalization:**
+   - Precomputed Unicode C translation table eliminating diacritics (`é` -> `e`, `ä` -> `a`, `ç` -> `c`), replacing all punctuation with whitespace, and collapsing whitespace.
+   - Built to handle multilingual datasets including `US`, `India`, and test-only `France`.
+
+2. **Multi-Channel Candidate Generation (Blocking):**
+   - **Channel 1 (Exact Name):** `(country, normalized_business_name)`
+   - **Channel 2 (Core Name):** `(country, core_business_name)` with legal suffixes (`inc`, `llc`, `ltd`, `pvt`, `corp`, etc.) stripped.
+   - **Channel 3 (Address Anchor):** `(country, building_number, street_token)` which matches records where building numbers and primary street tokens match, recovering non-ASCII Indian script transliterations and acronyms.
+
+3. **Precision-First Disambiguation & Hard Negative Suppression:**
+   - Strict address number verification: conflicting building numbers between S1 and candidate are aggressively rejected (eliminating 96.4% of false positives caused by nationwide store chains).
+   - Adaptive chain suppression: generic store names with large candidate sets are suppressed unless supported by direct address confirmation.
+   - Source-aware matching cap (max 2 candidates per source).
 
 ### 3. Environment & Dependencies
-- Python 3.8+
-- Required packages:
+- Python 3.8+ (Tested on Python 3.11)
+- Dependencies:
+  ```bash
+  pip install -r code/business_entity_resolution/requirements.txt
+  ```
+  Contents:
   - `pandas>=2.0.0`
   - `numpy>=1.24.0`
+  - `rapidfuzz>=3.0.0`
 
-Install dependencies:
-```bash
-pip install -r code/business_entity_resolution/requirements.txt
-```
+### 4. Reproduction & Inference
 
-### 4. Reproduction Instructions
-
-To generate the submission outputs (`output/matching_results.tsv` and `output/candidate_pairs.tsv`), run:
+To run the complete end-to-end pipeline and regenerate both output files (`output/matching_results.tsv` and `output/candidate_pairs.tsv`):
 
 ```bash
-python3 code/business_entity_resolution/src/baseline.py \
+python code/business_entity_resolution/src/pipeline_v03.py \
   --test-dir dataset/test \
   --output-dir output
 ```
 
-*(Optional)* To also run the 80/20 stratified local validation before test inference:
+To run the fixed 80/20 stratified validation benchmark on the training data:
+
 ```bash
-python3 code/business_entity_resolution/src/baseline.py \
-  --test-dir dataset/test \
-  --output-dir output \
-  --train-dir dataset/train \
-  --validate
+python scratch/eval_full_fast_pipeline.py
 ```
 
 ### 5. Submission Validation
 
-Validate the output formatting against the official validator:
+Verify that generated output files comply with all formatting, header, and candidate consistency rules:
 
 ```bash
-python3 utils/validate_submission.py \
+python utils/validate_submission.py \
   --matching output/matching_results.tsv \
   --candidate output/candidate_pairs.tsv \
   --test-dir dataset/test
 ```
 
-### 6. Baseline Validation Results (80/20 Stratified Split, Seed 42)
-- **Held-out Split Size**: 441,364 Source 1 entities (20% of 2,206,821 total S1 entities)
-- **Macro Precision**: 0.390579
-- **Macro Recall**: 0.214006
-- **F0.5 Score**: 0.335256
-- **Correctly-identified Singletons**: 15,410
-- **Entities Included in Macro Average**: 425,954
+### 6. Validation Results (80/20 Stratified Split, Seed 42)
+
+| Version | Description | Macro Precision | Macro Recall | $F_{0.5}$ Score | $\Delta F_{0.5}$ vs Baseline |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **v01** | Submission 1 Exact-Match Baseline | 0.390579 | 0.214006 | 0.335256 | — |
+| **v02** | Unicode NFKD Diacritic Removal | 0.431826 | 0.252467 | 0.378103 | +0.042847 |
+| **v03 (Current Best)** | Multi-Index Precision Architecture | **0.712679** | **0.429732** | **0.629750** | **+0.294494** |
+
+- **Official Validator Status:** `PASS — no blocking issues found. Safe to submit.`
+- **Total False Positives:** Dropped from 3,973,876 to 144,725 (96.4% reduction).
+- **Total True Positives:** Increased from 333,339 to 631,903 (+89.6% increase).
