@@ -1,0 +1,17 @@
+{
+  "version": "v03_precision_pipeline",
+  "phase": "Phase 4 - 12 Multi-Index Precision Architecture",
+  "change": "3-channel multi-index (exact name, core name, address anchor) + number conflict suppression + source cap",
+  "precision": 0.712679,
+  "recall": 0.429732,
+  "f0_5": 0.62975,
+  "delta": 0.294494,
+  "false_positives": 144725,
+  "false_negatives": 895964,
+  "candidate_count": 39906851,
+  "promoted": true,
+  "submitted": true,
+  "leaderboard_score": "Pending",
+  "status": "CURRENT BEST",
+  "notes": "Promoted to CURRENT BEST (+0.2945 absolute F0.5 gain over baseline, 96.4% FP reduction, official validator passed)"
+}
