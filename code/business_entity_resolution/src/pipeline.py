@@ -1,46 +1,22 @@
 #!/usr/bin/env python3
 """
-Amazon ML Challenge 2026: Business Entity Resolution
-Pipeline v06 — Precision-Hardened High-Recall Architecture (CURRENT BEST)
-
-Benchmark Progression:
-- v01 (Exact Baseline):           F0.5 = 0.335256 (P=0.3906, R=0.2140)
-- v02 (Unicode NFKD):             F0.5 = 0.378103 (P=0.4318, R=0.2525)
-- v03 (Precision Pipeline):       F0.5 = 0.629750 (P=0.7127, R=0.4297)
-- v04 (Decoupled Multi-Index):    F0.5 = 0.654825 (P=0.7793, R=0.3995)
-- v05 (High-Recall Architecture): F0.5 = 0.794977 (P=0.8287, R=0.6836)
-- v06 (Precision-Hardened):       F0.5 = 0.799943 (P=0.8335, R=0.6889) [~0.8000 Benchmark!]
-
-Key Innovations in v06:
-1. Indian Metro & Locality Conflict Guard:
-   - Identifies Indian metropolitan hubs (Delhi, Mumbai, Bengaluru, Chennai, Kolkata, Hyderabad, Pune).
-   - Suppresses cross-metro collisions between identical chain names across different states.
-2. Token Jaccard Disambiguation on Distinctive Names:
-   - Computes set Jaccard similarity on candidate pairs, eliminating 954 false positive collisions.
-3. Universal Brahmic Script Transliteration:
-   - Full algorithmic phonetic mapping of Devanagari, Tamil, Telugu, Kannada, Bengali, Gujarati to Latin base.
-4. Word Transposition & Postal Channels:
-   - Sorted core names and PIN/ZIP prefix channels recover altered word orders and missing street numbers.
-5. High-Throughput Buffered Output Generation:
-   - Employs 50,000-line memory batching to prevent OneDrive filesystem write-lock throttling.
+Amazon ML Challenge 2026: Fast Streaming Submission Generator (v10 High-Ceiling Architecture)
+Targeting 0.88 - 0.92+ Macro F0.5:
+1. Inverted stream processing (indexes S1 ~1.73M entities into ~2.5GB RAM, streams S2 & S3).
+2. Universal Indic Brahmic-to-Latin transliteration.
+3. Fast Phonetic Soundex blocking (bridges Aggarwal/Agarwal, Chowdhury/Chaudhary, Prasad/Prashad).
+4. Building number +/- 2 tolerance on identical street tokens.
+5. Locality + Street + Soundex channel for unnumbered addresses (b_num == 0).
+6. Character 3-gram fuzzy rescue for OCR/typo corruption.
+7. Generic industry word suppression eliminating spurious brand collisions.
 """
 
-import argparse
-import csv
-import json
-import os
-import re
-import string
-import sys
-import tempfile
-import time
-import unicodedata
+import csv, os, sys, time, string, unicodedata, re, tempfile, shutil
 from collections import defaultdict
-import numpy as np
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-# Fast C Translation table for diacritics and punctuation
+# Fast C Translation table
 CHAR_MAP = {ord(c): 32 for c in string.punctuation}
 for i in range(0x110000):
     if unicodedata.category(chr(i)).startswith('P'):
@@ -51,7 +27,6 @@ for pair in diacritic_pairs.split():
     CHAR_MAP[ord(pair[0])] = ord(pair[1])
     CHAR_MAP[ord(pair[0].upper())] = ord(pair[1])
 
-# Indic Brahmic script mapping to Latin phonetic characters
 BRAHMIC_OFFSET_MAP = {
     0x05: 'a', 0x06: 'a', 0x07: 'i', 0x08: 'i', 0x09: 'u', 0x0A: 'u', 0x0F: 'e', 0x13: 'o', 0x14: 'o',
     0x15: 'k', 0x16: 'k', 0x17: 'g', 0x18: 'g', 0x19: 'n',
@@ -83,17 +58,22 @@ def fast_norm(text: str) -> str:
         s = s.replace(dom, ' ')
     return " ".join(s.translate(CHAR_MAP).split())
 
-LEGAL_SUFFIXES = {
+GENERIC_INDUSTRY_WORDS = {
     'inc', 'incorporated', 'llc', 'ltd', 'limited', 'pvt', 'private', 'co', 'corp', 'corporation',
     'company', 'enterprises', 'enterprise', 'services', 'service', 'solutions', 'solution',
-    'technologies', 'technology', 'group', 'holdings', 'llp', 'pllc', 'sa', 'sarl', 'sas'
+    'technologies', 'technology', 'group', 'holdings', 'llp', 'pllc', 'sa', 'sarl', 'sas',
+    'construction', 'constructions', 'trading', 'builders', 'infra', 'infrastructure',
+    'logistics', 'industries', 'industry', 'consultancy', 'consultants', 'consulting',
+    'retail', 'agency', 'agencies', 'center', 'centre', 'motors', 'pharma', 'pharmaceuticals',
+    'jewellers', 'jewellery', 'textiles', 'properties', 'realty', 'real estate', 'developers'
 }
 
 STOP_WORDS = {
     'the', 'and', 'of', 'in', 'at', 'on', 'near', 'opp', 'opposite', 'behind', 'floor',
     'road', 'street', 'st', 'rd', 'ave', 'avenue', 'lane', 'drive', 'dr', 'way', 'hwy', 'highway',
     'plot', 'block', 'sector', 'nagar', 'colony', 'apartment', 'apartments', 'bldg', 'building',
-    'rue', 'avenue', 'boulevard', 'bd', 'chemin', 'place'
+    'rue', 'avenue', 'boulevard', 'bd', 'chemin', 'place', 'flat', 'room', 'office', 'unit',
+    'shop', 'cross', 'main', 'post', 'district', 'dist', 'taluk', 'tehsil', 'null'
 }
 
 INDIAN_METROS = {
@@ -113,7 +93,7 @@ def extract_metro(norm_addr: str) -> str:
     return ""
 
 def extract_core_name(norm_name: str) -> str:
-    tokens = [t for t in norm_name.split() if t not in LEGAL_SUFFIXES]
+    tokens = [t for t in norm_name.split() if t not in GENERIC_INDUSTRY_WORDS]
     return " ".join(tokens)
 
 def extract_primary_number(addr: str) -> int:
@@ -135,17 +115,70 @@ def extract_first_street_token(norm_addr: str) -> str:
             return t
     return ""
 
+def fast_soundex(word: str) -> str:
+    if not word:
+        return ""
+    w = word.lower()
+    first = w[0]
+    table = {
+        'b': '1', 'f': '1', 'p': '1', 'v': '1',
+        'c': '2', 'g': '2', 'j': '2', 'k': '2', 'q': '2', 's': '2', 'x': '2', 'z': '2',
+        'd': '3', 't': '3',
+        'l': '4',
+        'm': '5', 'n': '5',
+        'r': '6'
+    }
+    encoded = [first]
+    for char in w[1:]:
+        code = table.get(char, '')
+        if code and code != encoded[-1]:
+            encoded.append(code)
+    res = "".join(encoded).replace(first, first, 1)
+    return (res + "0000")[:4]
+
+def get_char_3grams(text: str) -> set:
+    s = text.replace(" ", "")
+    if len(s) < 3:
+        return {s}
+    return {s[i:i+3] for i in range(len(s) - 2)}
+
+def char_3gram_jaccard(g1: set, g2: set) -> float:
+    if not g1 or not g2:
+        return 0.0
+    u = len(g1 | g2)
+    return len(g1 & g2) / u if u > 0 else 0.0
+
 def token_jaccard(toks1: set, toks2: set) -> float:
     if not toks1 or not toks2:
         return 0.0
     u = len(toks1 | toks2)
     return len(toks1 & toks2) / u if u > 0 else 0.0
 
-def build_indices(s2_path: str, s3_path: str):
-    print("=" * 70)
-    print("INDEXING SOURCE 2 & SOURCE 3 (v06 HIGH-PRECISION ARCHITECTURE)")
-    print("=" * 70)
+def main():
+    test_dir = 'Amazon-ML-Challenge/dataset/test'
+    output_dir = 'Amazon-ML-Challenge/output'
+    os.makedirs(output_dir, exist_ok=True)
+
+    s1_path = os.path.join(test_dir, 'test_source1.tsv')
+    s2_path = os.path.join(test_dir, 'test_source2.tsv')
+    s3_path = os.path.join(test_dir, 'test_source3.tsv')
+
+    print("=" * 75)
+    print("PIPELINE v10 HIGH-CEILING STREAMING INFERENCE (TARGET: 0.88 - 0.92+)")
+    print("=" * 75)
+    t_start = time.time()
+
+    # Step 1: Index Source 1 into compact structures (~2.0 GB RAM)
+    print("Step 1/3: Ingesting & Indexing Source 1 (1.73M entities)...")
     t0 = time.time()
+
+    s1_ids = []
+    s1_bnum = []
+    s1_post = []
+    s1_metro = []
+    s1_fchar = []
+    s1_toks = []
+    s1_3grams = []
 
     idx_exact = defaultdict(list)
     idx_core = defaultdict(list)
@@ -154,270 +187,400 @@ def build_indices(s2_path: str, s3_path: str):
     idx_pin_prefix = defaultdict(list)
     idx_tok_street = defaultdict(list)
     idx_addr = defaultdict(list)
+    idx_street_soundex = defaultdict(list)
 
-    total_records = 0
-    for path in [s2_path, s3_path]:
-        t_f = time.time()
-        c = 0
-        with open(path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter='\t')
-            next(reader)
-            for row in reader:
-                c += 1
-                total_records += 1
-                eid = row[0]
-                country = fast_norm(row[3]) if len(row) > 3 else ""
-                norm_name = fast_norm(row[1])
-                if not norm_name or not country:
-                    continue
+    with open(s1_path, 'r', encoding='utf-8') as f:
+        r = csv.reader(f, delimiter='\t')
+        next(r)
+        for idx, row in enumerate(r):
+            s1_id = row[0]
+            s1_ids.append(s1_id)
+            country = fast_norm(row[3]) if len(row) > 3 else ""
+            norm_name = fast_norm(row[1])
+            raw_addr = row[2] if len(row) > 2 else ""
+            norm_addr = fast_norm(raw_addr)
+            b_num = extract_primary_number(raw_addr)
+            s_tok = extract_first_street_token(norm_addr)
+            postcode = extract_postal_code(raw_addr)
+            metro = extract_metro(norm_addr) if country == 'india' else ""
+            first_char = norm_name[0] if norm_name else ""
+            name_toks = set([t for t in norm_name.split() if t not in GENERIC_INDUSTRY_WORDS and t not in STOP_WORDS])
+            name_3g = get_char_3grams(norm_name)
+            core_name = extract_core_name(norm_name)
+            sorted_tokens = sorted(list(name_toks))
+            sorted_core = " ".join(sorted_tokens) if len(sorted_tokens) >= 2 else ""
 
-                raw_addr = row[2] if len(row) > 2 else ""
-                norm_addr = fast_norm(raw_addr)
-                b_num = extract_primary_number(raw_addr)
-                s_tok = extract_first_street_token(norm_addr)
-                postcode = extract_postal_code(raw_addr)
-                metro = extract_metro(norm_addr) if country == 'india' else ""
-                first_char = norm_name[0] if norm_name else ""
-                name_toks = set([t for t in norm_name.split() if t not in LEGAL_SUFFIXES and t not in STOP_WORDS])
+            s1_bnum.append(b_num)
+            s1_post.append(postcode)
+            s1_metro.append(metro)
+            s1_fchar.append(first_char)
+            s1_toks.append(name_toks)
+            s1_3grams.append(name_3g)
 
-                idx_exact[(country, norm_name)].append((eid, b_num, postcode, metro))
-                core_name = extract_core_name(norm_name)
+            if norm_name and country:
+                idx_exact[(country, norm_name)].append(idx)
                 if core_name and core_name != norm_name:
-                    idx_core[(country, core_name)].append((eid, b_num, postcode, metro))
-
-                sorted_tokens = sorted(list(name_toks))
-                if len(sorted_tokens) >= 2:
-                    sorted_core = " ".join(sorted_tokens)
-                    if sorted_core != core_name:
-                        idx_sorted_core[(country, sorted_core)].append((eid, b_num, postcode, metro))
-
+                    idx_core[(country, core_name)].append(idx)
+                if sorted_core and sorted_core != core_name:
+                    idx_sorted_core[(country, sorted_core)].append(idx)
                 if b_num > 0:
-                    if len(norm_name) >= 4 and len(idx_bnum_prefix[(country, b_num, norm_name[:4])]) < 10:
-                        idx_bnum_prefix[(country, b_num, norm_name[:4])].append(eid)
+                    if len(norm_name) >= 4 and len(idx_bnum_prefix[(country, b_num, norm_name[:4])]) < 8:
+                        idx_bnum_prefix[(country, b_num, norm_name[:4])].append(idx)
                     if s_tok:
-                        idx_addr[(country, b_num, s_tok)].append((eid, first_char, name_toks))
-
+                        idx_addr[(country, b_num, s_tok)].append(idx)
                 if s_tok:
-                    dist_toks = [t for t in name_toks if len(t) >= 5]
-                    if dist_toks and len(idx_tok_street[(country, dist_toks[0], s_tok)]) < 8:
-                        idx_tok_street[(country, dist_toks[0], s_tok)].append((eid, name_toks, metro))
+                    dist_toks = [t for t in name_toks if len(t) >= 5 and t not in GENERIC_INDUSTRY_WORDS]
+                    if dist_toks and len(idx_tok_street[(country, dist_toks[0], s_tok)]) < 6:
+                        idx_tok_street[(country, dist_toks[0], s_tok)].append(idx)
+                    # Soundex channel for unnumbered addresses
+                    if dist_toks:
+                        sdx = fast_soundex(dist_toks[0])
+                        if sdx and len(idx_street_soundex[(country, s_tok, metro if metro else "", sdx)]) < 5:
+                            idx_street_soundex[(country, s_tok, metro if metro else "", sdx)].append(idx)
+                if postcode and len(norm_name) >= 4 and len(idx_pin_prefix[(country, postcode, norm_name[:4])]) < 6:
+                    idx_pin_prefix[(country, postcode, norm_name[:4])].append(idx)
 
-                if postcode and len(norm_name) >= 4 and len(idx_pin_prefix[(country, postcode, norm_name[:4])]) < 8:
-                    idx_pin_prefix[(country, postcode, norm_name[:4])].append(eid)
+            if (idx + 1) % 500000 == 0:
+                print(f"  Indexed {idx+1:,} S1 entities in {time.time()-t0:.1f}s...")
 
-        print(f"  Indexed {c:,} records in {os.path.basename(path)} in {time.time()-t_f:.1f}s")
+    N = len(s1_ids)
+    print(f"Source 1 fully indexed: {N:,} entities in {time.time()-t0:.1f}s.")
 
-    print(f"Indices built across {total_records:,} records in {time.time()-t0:.1f}s.")
-    return idx_exact, idx_core, idx_sorted_core, idx_bnum_prefix, idx_pin_prefix, idx_tok_street, idx_addr
+    s1_matches_s2 = [[] for _ in range(N)]
+    s1_matches_s3 = [[] for _ in range(N)]
+    s1_cands_s2 = [[] for _ in range(N)]
+    s1_cands_s3 = [[] for _ in range(N)]
 
-def query_s1(row, idx_exact, idx_core, idx_sorted_core, idx_bnum_prefix, idx_pin_prefix, idx_tok_street, idx_addr):
-    country = fast_norm(row[3]) if len(row) > 3 else ""
-    norm_name = fast_norm(row[1])
-    raw_addr = row[2] if len(row) > 2 else ""
-    norm_addr = fast_norm(raw_addr)
-    b_num = extract_primary_number(raw_addr)
-    s_tok = extract_first_street_token(norm_addr)
-    postcode = extract_postal_code(raw_addr)
-    metro = extract_metro(norm_addr) if country == 'india' else ""
-    core_name = extract_core_name(norm_name)
-    first_char = norm_name[0] if norm_name else ""
-    s1_toks = set([t for t in norm_name.split() if t not in LEGAL_SUFFIXES and t not in STOP_WORDS])
-    sorted_tokens = sorted(list(s1_toks))
-    sorted_core = " ".join(sorted_tokens) if len(sorted_tokens) >= 2 else ""
+    # Step 2: Stream Source 2 (4.88M records)
+    print("\nStep 2/3: Streaming Source 2 against v10 high-precision indices...")
+    t0 = time.time()
+    with open(s2_path, 'r', encoding='utf-8') as f:
+        r = csv.reader(f, delimiter='\t')
+        next(r)
+        for i, row in enumerate(r):
+            s2_id = row[0]
+            country = fast_norm(row[3]) if len(row) > 3 else ""
+            norm_name = fast_norm(row[1])
+            if not norm_name or not country:
+                continue
 
-    scored_s2 = []
-    scored_s3 = []
-    seen_cands = set()
+            raw_addr = row[2] if len(row) > 2 else ""
+            norm_addr = fast_norm(raw_addr)
+            b_num = extract_primary_number(raw_addr)
+            s_tok = extract_first_street_token(norm_addr)
+            postcode = extract_postal_code(raw_addr)
+            metro = extract_metro(norm_addr) if country == 'india' else ""
+            first_char = norm_name[0] if norm_name else ""
+            name_toks = set([t for t in norm_name.split() if t not in GENERIC_INDUSTRY_WORDS and t not in STOP_WORDS])
+            name_3g = get_char_3grams(norm_name)
+            core_name = extract_core_name(norm_name)
+            sorted_tokens = sorted(list(name_toks))
+            sorted_core = " ".join(sorted_tokens) if len(sorted_tokens) >= 2 else ""
 
-    def add_s(sc, cid):
-        seen_cands.add(cid)
-        if sc >= 75:
-            if cid.startswith('S2-'): scored_s2.append((sc, cid))
-            else: scored_s3.append((sc, cid))
+            matched_s1_indices = {}
 
-    # 1. Exact Name Matches
-    exact_list = idx_exact.get((country, norm_name), [])
-    bkt = len(exact_list)
-    for c_eid, c_num, c_post, c_metro in exact_list:
-        score = 0
-        if metro and c_metro and metro != c_metro:
-            score = 0
-        elif postcode and c_post and postcode != c_post:
-            score = 0
-        elif b_num > 0 and c_num > 0:
-            score = 100 if b_num == c_num else 0
-        elif b_num == 0 or c_num == 0:
-            score = 90 if (postcode and c_post and postcode == c_post) else (85 if bkt <= 6 else (80 if bkt <= 12 else 0))
-        add_s(score, c_eid)
+            # Exact Name
+            for s1_i in idx_exact.get((country, norm_name), []):
+                s1_m = s1_metro[s1_i]
+                s1_p = s1_post[s1_i]
+                s1_b = s1_bnum[s1_i]
+                if metro and s1_m and metro != s1_m:
+                    continue
+                if postcode and s1_p and postcode != s1_p:
+                    continue
+                if b_num > 0 and s1_b > 0:
+                    score = 100 if b_num == s1_b else (92 if abs(b_num - s1_b) <= 2 else 0)
+                else:
+                    score = 94 if (postcode and s1_p and postcode == s1_p) else 88
+                if score >= 75:
+                    matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), score)
 
-    # 2. Core Name Matches
-    if core_name and core_name != norm_name:
-        core_list = idx_core.get((country, core_name), [])
-        core_bkt = len(core_list)
-        for c_eid, c_num, c_post, c_metro in core_list:
-            score = 0
-            if metro and c_metro and metro != c_metro:
-                score = 0
-            elif postcode and c_post and postcode != c_post:
-                score = 0
-            elif b_num > 0 and c_num > 0:
-                score = 90 if b_num == c_num else 0
-            elif b_num == 0 or c_num == 0:
-                score = 80 if core_bkt <= 3 else 0
-            add_s(score, c_eid)
-
-    # 3. Sorted Core Name Matches
-    if sorted_core and sorted_core != core_name:
-        sc_list = idx_sorted_core.get((country, sorted_core), [])
-        sc_bkt = len(sc_list)
-        for c_eid, c_num, c_post, c_metro in sc_list:
-            score = 0
-            if metro and c_metro and metro != c_metro:
-                score = 0
-            elif postcode and c_post and postcode != c_post:
-                score = 0
-            elif b_num > 0 and c_num > 0:
-                score = 88 if b_num == c_num else 0
-            elif b_num == 0 or c_num == 0:
-                score = 80 if sc_bkt <= 2 else 0
-            add_s(score, c_eid)
-
-    # 4. Building Number + Name 4-char Prefix
-    if b_num > 0 and len(norm_name) >= 4:
-        p_list = idx_bnum_prefix.get((country, b_num, norm_name[:4]), [])
-        if 0 < len(p_list) <= 4:
-            for c_eid in p_list:
-                add_s(84, c_eid)
-
-    # 5. Address Anchor Matches (with Jaccard / first_char guard)
-    if b_num > 0 and s_tok:
-        addr_list = idx_addr.get((country, b_num, s_tok), [])
-        a_bkt = len(addr_list)
-        if 0 < a_bkt <= 6:
-            for c_eid, c_fchar, c_toks in addr_list:
-                jacc = token_jaccard(s1_toks, c_toks)
-                if jacc >= 0.33 or (first_char and c_fchar and first_char == c_fchar):
-                    add_s(76, c_eid)
-
-    # 6. Distinctive Name Token + Street Token (with Jaccard & Metro guard)
-    if s_tok:
-        dist_toks = [t for t in s1_toks if len(t) >= 5]
-        if dist_toks:
-            ts_list = idx_tok_street.get((country, dist_toks[0], s_tok), [])
-            if 0 < len(ts_list) <= 4:
-                for c_eid, c_toks, c_metro in ts_list:
-                    if metro and c_metro and metro != c_metro:
+            # Core Name
+            if core_name and core_name != norm_name:
+                for s1_i in idx_core.get((country, core_name), []):
+                    s1_m = s1_metro[s1_i]
+                    s1_p = s1_post[s1_i]
+                    s1_b = s1_bnum[s1_i]
+                    if metro and s1_m and metro != s1_m:
                         continue
-                    jacc = token_jaccard(s1_toks, c_toks)
-                    if jacc >= 0.30 or len(dist_toks[0]) >= 7:
-                        add_s(85, c_eid)
+                    if postcode and s1_p and postcode != s1_p:
+                        continue
+                    if b_num > 0 and s1_b > 0:
+                        score = 94 if b_num == s1_b else (88 if abs(b_num - s1_b) <= 2 else 0)
+                    else:
+                        score = 84
+                    if score >= 75:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), score)
 
-    # 7. Postal Code + Name 4-char Prefix
-    if postcode and len(norm_name) >= 4:
-        pin_list = idx_pin_prefix.get((country, postcode, norm_name[:4]), [])
-        if 0 < len(pin_list) <= 4:
-            for c_eid in pin_list:
-                add_s(84, c_eid)
+            # Sorted Core
+            if sorted_core and sorted_core != core_name:
+                for s1_i in idx_sorted_core.get((country, sorted_core), []):
+                    s1_m = s1_metro[s1_i]
+                    s1_p = s1_post[s1_i]
+                    s1_b = s1_bnum[s1_i]
+                    if metro and s1_m and metro != s1_m:
+                        continue
+                    if postcode and s1_p and postcode != s1_p:
+                        continue
+                    if b_num > 0 and s1_b > 0:
+                        score = 92 if b_num == s1_b else (86 if abs(b_num - s1_b) <= 2 else 0)
+                    else:
+                        score = 82
+                    if score >= 75:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), score)
 
-    scored_s2.sort(reverse=True)
-    scored_s3.sort(reverse=True)
+            # Bnum Prefix
+            if b_num > 0 and len(norm_name) >= 4:
+                for s1_i in idx_bnum_prefix.get((country, b_num, norm_name[:4]), []):
+                    jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                    g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                    if jacc >= 0.25 or g_jacc >= 0.35:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 88)
 
-    top_matches = sorted(list(set([cid for sc, cid in scored_s2[:5]] + [cid for sc, cid in scored_s3[:5]])))
-    all_candidates = sorted(list(seen_cands))
+            # Addr Anchor
+            if b_num > 0 and s_tok:
+                for s1_i in idx_addr.get((country, b_num, s_tok), []):
+                    jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                    g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                    if jacc >= 0.25 or g_jacc >= 0.35 or (first_char and s1_fchar[s1_i] and first_char == s1_fchar[s1_i] and g_jacc >= 0.25):
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 82)
 
-    return top_matches, all_candidates
+            # Dist Token + Street
+            dist_toks = [t for t in name_toks if len(t) >= 5 and t not in GENERIC_INDUSTRY_WORDS]
+            if s_tok and dist_toks:
+                for s1_i in idx_tok_street.get((country, dist_toks[0], s_tok), []):
+                    s1_m = s1_metro[s1_i]
+                    if metro and s1_m and metro != s1_m:
+                        continue
+                    jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                    g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                    if jacc >= 0.30 or g_jacc >= 0.40:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 90)
 
-def run_test_inference(test_dir: str, output_dir: str):
-    os.makedirs(output_dir, exist_ok=True)
-    s1_path = os.path.join(test_dir, "test_source1.tsv")
-    s2_path = os.path.join(test_dir, "test_source2.tsv")
-    s3_path = os.path.join(test_dir, "test_source3.tsv")
+                # Soundex channel for unnumbered addresses
+                sdx = fast_soundex(dist_toks[0])
+                if sdx:
+                    for s1_i in idx_street_soundex.get((country, s_tok, metro if metro else "", sdx), []):
+                        jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                        g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                        if jacc >= 0.33 or g_jacc >= 0.45:
+                            matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 86)
+
+            # PIN Prefix
+            if postcode and len(norm_name) >= 4:
+                for s1_i in idx_pin_prefix.get((country, postcode, norm_name[:4]), []):
+                    jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                    g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                    if jacc >= 0.30 or g_jacc >= 0.40:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 86)
+
+            for s1_i, sc in matched_s1_indices.items():
+                if len(s1_cands_s2[s1_i]) < 8:
+                    s1_cands_s2[s1_i].append(s2_id)
+                if sc >= 75 and len(s1_matches_s2[s1_i]) < 6:
+                    s1_matches_s2[s1_i].append((sc, s2_id))
+
+            if (i + 1) % 1000000 == 0:
+                print(f"  Streamed {i+1:,} Source 2 records in {time.time()-t0:.1f}s...")
+
+    print(f"Source 2 streaming completed in {time.time()-t0:.1f}s.")
+
+    # Step 3: Stream Source 3 (5.08M records)
+    print("\nStep 3/3: Streaming Source 3 against v10 high-precision indices...")
+    t0 = time.time()
+    with open(s3_path, 'r', encoding='utf-8') as f:
+        r = csv.reader(f, delimiter='\t')
+        next(r)
+        for i, row in enumerate(r):
+            s3_id = row[0]
+            country = fast_norm(row[3]) if len(row) > 3 else ""
+            norm_name = fast_norm(row[1])
+            if not norm_name or not country:
+                continue
+
+            raw_addr = row[2] if len(row) > 2 else ""
+            norm_addr = fast_norm(raw_addr)
+            b_num = extract_primary_number(raw_addr)
+            s_tok = extract_first_street_token(norm_addr)
+            postcode = extract_postal_code(raw_addr)
+            metro = extract_metro(norm_addr) if country == 'india' else ""
+            first_char = norm_name[0] if norm_name else ""
+            name_toks = set([t for t in norm_name.split() if t not in GENERIC_INDUSTRY_WORDS and t not in STOP_WORDS])
+            name_3g = get_char_3grams(norm_name)
+            core_name = extract_core_name(norm_name)
+            sorted_tokens = sorted(list(name_toks))
+            sorted_core = " ".join(sorted_tokens) if len(sorted_tokens) >= 2 else ""
+
+            matched_s1_indices = {}
+
+            # Exact Name
+            for s1_i in idx_exact.get((country, norm_name), []):
+                s1_m = s1_metro[s1_i]
+                s1_p = s1_post[s1_i]
+                s1_b = s1_bnum[s1_i]
+                if metro and s1_m and metro != s1_m:
+                    continue
+                if postcode and s1_p and postcode != s1_p:
+                    continue
+                if b_num > 0 and s1_b > 0:
+                    score = 100 if b_num == s1_b else (92 if abs(b_num - s1_b) <= 2 else 0)
+                else:
+                    score = 94 if (postcode and s1_p and postcode == s1_p) else 88
+                if score >= 75:
+                    matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), score)
+
+            # Core Name
+            if core_name and core_name != norm_name:
+                for s1_i in idx_core.get((country, core_name), []):
+                    s1_m = s1_metro[s1_i]
+                    s1_p = s1_post[s1_i]
+                    s1_b = s1_bnum[s1_i]
+                    if metro and s1_m and metro != s1_m:
+                        continue
+                    if postcode and s1_p and postcode != s1_p:
+                        continue
+                    if b_num > 0 and s1_b > 0:
+                        score = 94 if b_num == s1_b else (88 if abs(b_num - s1_b) <= 2 else 0)
+                    else:
+                        score = 84
+                    if score >= 75:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), score)
+
+            # Sorted Core
+            if sorted_core and sorted_core != core_name:
+                for s1_i in idx_sorted_core.get((country, sorted_core), []):
+                    s1_m = s1_metro[s1_i]
+                    s1_p = s1_post[s1_i]
+                    s1_b = s1_bnum[s1_i]
+                    if metro and s1_m and metro != s1_m:
+                        continue
+                    if postcode and s1_p and postcode != s1_p:
+                        continue
+                    if b_num > 0 and s1_b > 0:
+                        score = 92 if b_num == s1_b else (86 if abs(b_num - s1_b) <= 2 else 0)
+                    else:
+                        score = 82
+                    if score >= 75:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), score)
+
+            # Bnum Prefix
+            if b_num > 0 and len(norm_name) >= 4:
+                for s1_i in idx_bnum_prefix.get((country, b_num, norm_name[:4]), []):
+                    jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                    g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                    if jacc >= 0.25 or g_jacc >= 0.35:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 88)
+
+            # Addr Anchor
+            if b_num > 0 and s_tok:
+                for s1_i in idx_addr.get((country, b_num, s_tok), []):
+                    jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                    g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                    if jacc >= 0.25 or g_jacc >= 0.35 or (first_char and s1_fchar[s1_i] and first_char == s1_fchar[s1_i] and g_jacc >= 0.25):
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 82)
+
+            # Dist Token + Street
+            dist_toks = [t for t in name_toks if len(t) >= 5 and t not in GENERIC_INDUSTRY_WORDS]
+            if s_tok and dist_toks:
+                for s1_i in idx_tok_street.get((country, dist_toks[0], s_tok), []):
+                    s1_m = s1_metro[s1_i]
+                    if metro and s1_m and metro != s1_m:
+                        continue
+                    jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                    g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                    if jacc >= 0.30 or g_jacc >= 0.40:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 90)
+
+                # Soundex channel for unnumbered addresses
+                sdx = fast_soundex(dist_toks[0])
+                if sdx:
+                    for s1_i in idx_street_soundex.get((country, s_tok, metro if metro else "", sdx), []):
+                        jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                        g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                        if jacc >= 0.33 or g_jacc >= 0.45:
+                            matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 86)
+
+            # PIN Prefix
+            if postcode and len(norm_name) >= 4:
+                for s1_i in idx_pin_prefix.get((country, postcode, norm_name[:4]), []):
+                    jacc = token_jaccard(name_toks, s1_toks[s1_i])
+                    g_jacc = char_3gram_jaccard(name_3g, s1_3grams[s1_i])
+                    if jacc >= 0.30 or g_jacc >= 0.40:
+                        matched_s1_indices[s1_i] = max(matched_s1_indices.get(s1_i, 0), 86)
+
+            for s1_i, sc in matched_s1_indices.items():
+                if len(s1_cands_s3[s1_i]) < 8:
+                    s1_cands_s3[s1_i].append(s3_id)
+                if sc >= 75 and len(s1_matches_s3[s1_i]) < 6:
+                    s1_matches_s3[s1_i].append((sc, s3_id))
+
+            if (i + 1) % 1000000 == 0:
+                print(f"  Streamed {i+1:,} Source 3 records in {time.time()-t0:.1f}s...")
+
+    print(f"Source 3 streaming completed in {time.time()-t0:.1f}s.")
+
+    # Step 4: Write Final Submission Files
+    print("\nStep 4: Writing final submission files...")
+    t0 = time.time()
+
+    temp_dir = tempfile.gettempdir()
+    temp_match = os.path.join(temp_dir, "temp_stream_matching_v10.tsv")
+    temp_cand = os.path.join(temp_dir, "temp_stream_candidate_v10.tsv")
+
     matching_out = os.path.join(output_dir, "matching_results.tsv")
     candidate_out = os.path.join(output_dir, "candidate_pairs.tsv")
 
-    print("=" * 70)
-    print("RUNNING FAST TEST INFERENCE (PIPELINE v06 — BATCH BUFFERED)")
-    print(f"  Test directory:   {test_dir}")
-    print(f"  Output directory: {output_dir}")
-    print("=" * 70)
-
-    t_start = time.time()
-    idx_exact, idx_core, idx_sorted_core, idx_bnum_prefix, idx_pin_prefix, idx_tok_street, idx_addr = build_indices(s2_path, s3_path)
-
-    print("\nProcessing Source 1 queries and generating buffered outputs...")
-    t0 = time.time()
-    total_s1 = 0
-    matched_s1 = 0
+    matched_count = 0
     total_matches = 0
-    total_candidates = 0
 
-    match_buffer = []
-    cand_buffer = []
-    BATCH_SIZE = 50000
+    with open(temp_match, 'w', encoding='utf-8', newline='') as f_m, \
+         open(temp_cand, 'w', encoding='utf-8', newline='') as f_c:
+        
+        f_m.write("source1_entity_id\tmatched_entity_ids\n")
+        f_c.write("source1_entity_id\tcandidate_entity_ids\n")
 
-    # Write to local temp files first to avoid OneDrive real-time write locks
-    temp_dir = tempfile.gettempdir()
-    temp_match = os.path.join(temp_dir, "temp_matching_results.tsv")
-    temp_cand = os.path.join(temp_dir, "temp_candidate_pairs.tsv")
+        m_buf = []
+        c_buf = []
 
-    with open(s1_path, 'r', encoding='utf-8') as f_in, \
-         open(temp_match, 'w', encoding='utf-8', newline='') as f_match, \
-         open(temp_cand, 'w', encoding='utf-8', newline='') as f_cand:
+        for i in range(N):
+            s1_id = s1_ids[i]
 
-        f_match.write("source1_entity_id\tmatched_entity_ids\n")
-        f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
+            s1_matches_s2[i].sort(reverse=True)
+            s1_matches_s3[i].sort(reverse=True)
 
-        reader = csv.reader(f_in, delimiter='\t')
-        next(reader)
-        for row in reader:
-            total_s1 += 1
-            s1_id = row[0]
-            top_matches, all_candidates = query_s1(row, idx_exact, idx_core, idx_sorted_core, idx_bnum_prefix, idx_pin_prefix, idx_tok_street, idx_addr)
+            top_matches = [cid for sc, cid in s1_matches_s2[i][:4]] + [cid for sc, cid in s1_matches_s3[i][:4]]
+            all_cands = s1_cands_s2[i][:8] + s1_cands_s3[i][:8]
 
             match_str = ",".join(top_matches)
-            cand_str = ",".join(all_candidates)
+            cand_str = ",".join(all_cands)
 
             if top_matches:
-                matched_s1 += 1
+                matched_count += 1
                 total_matches += len(top_matches)
-            total_candidates += len(all_candidates)
 
-            match_buffer.append(f"{s1_id}\t{match_str}\n")
-            cand_buffer.append(f"{s1_id}\t{cand_str}\n")
+            m_buf.append(f"{s1_id}\t{match_str}\n")
+            c_buf.append(f"{s1_id}\t{cand_str}\n")
 
-            if len(match_buffer) >= BATCH_SIZE:
-                f_match.write("".join(match_buffer))
-                f_cand.write("".join(cand_buffer))
-                match_buffer.clear()
-                cand_buffer.clear()
+            if len(m_buf) >= 50000:
+                f_m.write("".join(m_buf))
+                f_c.write("".join(c_buf))
+                m_buf.clear()
+                c_buf.clear()
 
-            if total_s1 % 300000 == 0:
-                print(f"  Processed {total_s1:,} queries in {time.time()-t0:.1f}s...")
+        if m_buf:
+            f_m.write("".join(m_buf))
+            f_c.write("".join(c_buf))
 
-        if match_buffer:
-            f_match.write("".join(match_buffer))
-            f_cand.write("".join(cand_buffer))
-
-    # Move temp files to target output atomically
-    import shutil
     shutil.move(temp_match, matching_out)
     shutil.move(temp_cand, candidate_out)
 
-    print(f"\nInference completed in {time.time()-t_start:.1f}s.")
-    print(f"  Total S1 queries: {total_s1:,}")
-    print(f"  Queries with matches: {matched_s1:,} ({matched_s1/total_s1*100:.2f}%)")
-    print(f"  Singletons: {total_s1 - matched_s1:,} ({(total_s1 - matched_s1)/total_s1*100:.2f}%)")
-    print(f"  Total candidate pairs: {total_candidates:,}")
-    print(f"  Total final matches:   {total_matches:,}")
-    print(f"  Wrote: {matching_out} and {candidate_out}")
-
-def main():
-    parser = argparse.ArgumentParser(description="Pipeline v06 — Precision-Hardened Architecture")
-    parser.add_argument("--test-dir", default="Amazon-ML-Challenge/dataset/test", help="Test dataset directory")
-    parser.add_argument("--output-dir", default="Amazon-ML-Challenge/output", help="Output directory")
-    args = parser.parse_args()
-
-    run_test_inference(args.test_dir, args.output_dir)
+    print(f"\nFiles generated in {time.time()-t0:.1f}s!")
+    print(f"  Total S1 rows written: {N:,} (100% of test entities)")
+    print(f"  S1 entities with matches: {matched_count:,} ({matched_count/N*100:.2f}%)")
+    print(f"  Singletons: {N - matched_count:,} ({(N - matched_count)/N*100:.2f}%)")
+    print(f"  Total execution time: {time.time()-t_start:.1f}s")
+    print(f"  Destination 1: {matching_out}")
+    print(f"  Destination 2: {candidate_out}")
 
 if __name__ == '__main__':
     main()
