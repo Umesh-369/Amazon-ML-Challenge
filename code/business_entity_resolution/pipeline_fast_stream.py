@@ -176,6 +176,9 @@ def main():
 
     print("=" * 75)
     print("PIPELINE v10 HIGH-CEILING STREAMING INFERENCE (TARGET: 0.88 - 0.92+)")
+    print(f"  Project Root:     {project_root}")
+    print(f"  Test Directory:   {test_dir}")
+    print(f"  Output Directory: {output_dir}")
     print("=" * 75)
     t_start = time.time()
 
