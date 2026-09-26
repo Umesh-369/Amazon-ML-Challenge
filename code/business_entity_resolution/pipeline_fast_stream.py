@@ -155,8 +155,19 @@ def token_jaccard(toks1: set, toks2: set) -> float:
     return len(toks1 & toks2) / u if u > 0 else 0.0
 
 def main():
-    test_dir = 'Amazon-ML-Challenge/dataset/test'
-    output_dir = 'Amazon-ML-Challenge/output'
+    # Auto-detect project root so the script works from any working directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.exists(os.path.join(script_dir, "../../dataset/test")):
+        project_root = os.path.abspath(os.path.join(script_dir, "../../"))
+    elif os.path.exists(os.path.join(os.getcwd(), "dataset/test")):
+        project_root = os.path.abspath(os.getcwd())
+    elif os.path.exists(os.path.join(os.getcwd(), "Amazon-ML-Challenge/dataset/test")):
+        project_root = os.path.abspath(os.path.join(os.getcwd(), "Amazon-ML-Challenge"))
+    else:
+        project_root = r"c:\Users\91901\OneDrive\Desktop\Sports-Tracker\Amazon-ML-Challenge"
+
+    test_dir = os.path.join(project_root, "dataset", "test")
+    output_dir = os.path.join(project_root, "output")
     os.makedirs(output_dir, exist_ok=True)
 
     s1_path = os.path.join(test_dir, 'test_source1.tsv')
