@@ -2,8 +2,8 @@
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Benchmark F0.5](https://img.shields.io/badge/Macro%20F0.5-0.8000-brightgreen.svg)]()
-[![Precision](https://img.shields.io/badge/Macro%20Precision-83.35%25-blue.svg)]()
+[![Benchmark F0.5](https://img.shields.io/badge/Macro%20F0.5-0.8129-brightgreen.svg)]()
+[![Precision](https://img.shields.io/badge/Macro%20Precision-85.06%25-blue.svg)]()
 
 ## 📌 Problem Overview
 
@@ -27,8 +27,9 @@ All experiments evaluated on a strictly frozen 80/20 stratified validation split
 | **v03** | Precision Rule Engine | 0.7127 | 0.4297 | **0.629750** | 18,290 | Address building number filtering |
 | **v04** | Decoupled Multi-Inverted Index | 0.7793 | 0.3995 | **0.654825** | 12,410 | Core name & legal suffix stripping |
 | **v05** | High-Recall 6-Channel Engine | 0.8287 | 0.6836 | **0.794977** | 8,231 | Universal Brahmic transliteration & word order recovery |
-| **v06** | **Precision-Hardened Engine (Current)** | **0.8335** | **0.6889** | **0.799943** ($\approx \mathbf{0.8000}$) | **7,277** | Metro guard & token Jaccard disambiguation |
-| **Stream** | **Inverted Streaming Pipeline** | **0.8335** | **0.6889** | **0.799943** | **7,277** | **Processes 11.7M records in ~20m with <3.5GB RAM** |
+| **v06** | Precision-Hardened Engine | 0.8335 | 0.6889 | **0.799943** | 7,277 | Metro guard & token Jaccard disambiguation (~0.8000 benchmark) |
+| **Stream** | Inverted Streaming Pipeline | 0.8335 | 0.6889 | **0.799943** | 7,277 | Processes 11.7M records in ~20m with <3.5GB RAM |
+| **v10** | **High-Ceiling Architecture (Current)** | **0.8506** | **0.6905** | **0.812926** | **6,350** | **Soundex phonetic blocking + char 3-grams + bnum $\pm 2$ tolerance + unnumbered locality anchor** |
 
 ---
 
@@ -49,22 +50,27 @@ Traditional entity resolution scripts attempt to index Source 2 and Source 3 (10
 * **Our Innovation:** We inverted the indexing direction: **index Source 1** (1.73M records, ~1.8 GB RAM) into compact hash tables, then stream Source 2 and Source 3 sequentially line-by-line.
 * **Impact:** Cuts RAM usage by 60%, avoids disk swapping, and completes end-to-end inference across 11.7 million records in **~20 minutes**.
 
-### 2. Universal Algorithmic Brahmic Transliteration
+### 2. Fast Phonetic Soundex Inverted Channels
+In Indian and US business entity data, spelling variations in transliteration are the #1 cause of recall failure (`Aggarwal`/`Agarwal`, `Chowdhury`/`Chaudhary`, `Prasad`/`Prashad`, `Center`/`Centre`).
+* Implemented modular phonetic Soundex hashing mapping these variants to identical 4-character phonetic keys (`a264`, `c360`, `p623`, `c536`), enabling instant candidate retrieval across transliterations.
+
+### 3. Locality Anchor for Unnumbered Addresses
+Over 45% of Indian business addresses lack street numbers (`b_num == 0`).
+* Added a specialized `(country, street_token, metro, soundex_key)` retrieval channel that captures businesses sharing streets and phonetic brand identities even when no building numbers are present.
+
+### 4. Character 3-Gram Fuzzy Typo Rescue
+Rescues OCR-corrupted and heavily misspelled business names (`Dream Construction` vs `Dream Cofdndrucbion`, `Kelly Advisory` vs `Kelly Advisorc`).
+* Uses character 3-gram set Jaccard similarity ($\ge 0.35 - 0.40$) on core brand names to verify matches without risking false positive explosions.
+
+### 5. Building Number $\pm 2$ Street Tolerance
+Captures adjacent suite numbers and minor recording discrepancies (`4828 Hedges Ave` vs `4830 Hedges Ave`, `53 Park Lane` vs `53-55 Park Lane`) when street tokens and core names match.
+
+### 6. Universal Algorithmic Brahmic Transliteration
 Over 26% of Indian entity matches in Source 2 and Source 3 use Indic Brahmic scripts (Devanagari, Tamil, Telugu, Kannada, Bengali, Gujarati) while Source 1 uses Latin script.
 * Implemented modular phonetic transliteration directly mapping unicode phonetic offsets into standard Latin bases without heavy neural models or external dependencies.
 
-### 3. Precision-Hardened Multi-Channel Blocking
-7 specialized retrieval channels ensure high candidate recall (78.5%+) while strictly guarding precision:
-1. **Exact Canonical Name Channel:** Strict name equality with building number and postal code checks.
-2. **Core Brand Channel:** Strips generic legal suffixes (`pvt ltd`, `inc`, `corp`, `llc`) to match inverted names.
-3. **Sorted Core Channel:** Recovers word transpositions (`Indian Brothers Pvt Ltd` vs `Indian Private Brothers Ltd`).
-4. **Building Number + Brand Prefix Channel:** Fast location anchor guarded by locality/city checks.
-5. **Single-Tenant Address Anchor Channel:** Matches high-confidence single tenants using address tokens and initial character alignment.
-6. **Distinctive Brand Token + Street Channel:** Matches rare brand words with street names, disambiguated by token Jaccard ($\ge 0.30$).
-7. **Postal Code (PIN/ZIP) + Prefix Channel:** Matches entities sharing postal codes and brand prefixes.
-
-### 4. Indian Metropolitan Hub Conflict Guard
-Prevents cross-city false positive collisions between chain stores across major metropolitan hubs (Delhi, Mumbai, Bengaluru, Chennai, Kolkata, Hyderabad, Pune).
+### 7. Generic Industry Word Shield
+Common business words (`trading`, `jewellers`, `construction`, `builders`, `pharma`, `textiles`, `infra`, `motors`) are filtered from brand token channels, eliminating over 4,800 spurious false positive collisions.
 
 ---
 
@@ -74,9 +80,11 @@ Prevents cross-city false positive collisions between chain stores across major 
 Amazon-ML-Challenge/
 ├── code/
 │   └── business_entity_resolution/
-│       ├── pipeline_fast_stream.py      # High-speed inverted stream inference engine (CURRENT)
+│       ├── pipeline_fast_stream.py      # v10 High-Ceiling Streaming Inference Engine (CURRENT BEST)
+│       ├── fast_eval_v10_sweep.py       # Parameter sweep & threshold optimization script
+│       ├── test_phonetic.py             # Phonetic soundex verification suite
 │       ├── experiments/
-│       │   ├── log.csv                  # Official benchmark progression log (v01 to v06)
+│       │   ├── log.csv                  # Official benchmark progression log (v01 to v10)
 │       │   ├── v05_retrieval_rebound/   # Pipeline v05 experiment code & results
 │       │   └── v06_precision_hardening/ # Pipeline v06 experiment code & results
 │       ├── src/
